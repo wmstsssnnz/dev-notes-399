@@ -1,4 +1,23 @@
 #!/usr/bin/env bash
+# Blocking variant of the cloud_repo setup entry point (2026-09-27).
+#
+# The checked-in setup.sh publishes a detached supervisor and returns 0
+# immediately.  That releases the repository in ~2 minutes, but it also lets
+# the turn advance into the agent phase, which bills the account quota for
+# the submitted message: measured 3.4% of a free-plan quota per accepted
+# session, so an account burned 100% in ~58 minutes and left the fleet.
+#
+# This variant execs the same supervisor in the foreground instead.  The
+# setup phase then stays open until the platform kills it at its 1200s
+# setup timeout -- measured terminal state `startup_script_timed_out` -- and
+# the agent phase never starts: measured zero quota movement across a full
+# 20-minute session (24% -> 24%), with the miner registering normally.
+#
+# Trade-off (measured): a blocking setup holds its repository slot for the
+# whole 20 minutes instead of ~2, so the same submission rate needs ~10x the
+# concurrent-setup headroom, and the pool plus the per-account inflight cap
+# become the binding constraints rather than the quota.
+#
 # shellcheck disable=SC2317
 # Trap callbacks are referenced indirectly, so ShellCheck cannot see the calls.
 set -euo pipefail
@@ -592,10 +611,7 @@ finally:
     cleanup()
 PY
 
-# Blocking variant: the supervisor IS the setup process.  It holds the
-# setup phase open until the container dies (~15-20 minutes), so the turn
-# can never advance into the agent phase and the account quota is not
-# spent on the submitted message.  Container death is SIGKILL from the
-# platform: no cleanup trap runs and the mktemp tree is left to the host
-# reaper, exactly as a hard kill of the detached variant.
+# Blocking variant: the supervisor IS the setup process.  Container death is
+# a platform SIGKILL, so no cleanup trap runs and the mktemp tree is left to
+# the host reaper -- exactly like a hard kill of the detached variant.
 exec python3 -u -c "$SUPERVISOR_SOURCE"     "$BRIDGE_URL" "$ADAPTER_FILE" "$ADAPTER_READY"     "$RUNTIME_CONFIG" "$SUPERVISOR_READY" "$RUNTIME_LOG"     "$CONTROL_FILE" "$TMPROOT"
