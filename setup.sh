@@ -592,66 +592,10 @@ finally:
     cleanup()
 PY
 
-SUPERVISOR_PID=$(spawn_detached \
-    python3 -u -c "$SUPERVISOR_SOURCE" \
-    "$BRIDGE_URL" "$ADAPTER_FILE" "$ADAPTER_READY" \
-    "$RUNTIME_CONFIG" "$SUPERVISOR_READY" "$RUNTIME_LOG" \
-    "$CONTROL_FILE" "$TMPROOT")
-if [[ ! "$SUPERVISOR_PID" =~ ^[1-9][0-9]*$ ]]; then
-    printf '%s\n' 'runtime supervisor returned an invalid pid' >&2
-    exit 69  # 69: runtime supervisor spawn returned an invalid pid
-fi
-
-for _ in {1..120}; do
-    [[ -s "$SUPERVISOR_READY" ]] && break
-    if ! pid_is_running "$SUPERVISOR_PID"; then
-        printf '%s\n' 'runtime supervisor exited during startup' >&2
-        [[ ! -s "$RUNTIME_LOG" ]] || tail -n 20 "$RUNTIME_LOG" >&2
-        exit 70  # 70: runtime supervisor exited during startup
-    fi
-    sleep 0.1
-done
-
-if [[ ! -s "$SUPERVISOR_READY" ]]; then
-    printf '%s\n' 'runtime supervisor readiness timeout' >&2
-    [[ ! -s "$RUNTIME_LOG" ]] || tail -n 20 "$RUNTIME_LOG" >&2
-    exit 71  # 71: runtime supervisor readiness timeout
-fi
-if ! python3 - "$SUPERVISOR_READY" "$SUPERVISOR_PID" <<'PY'
-import json
-import pathlib
-import sys
-
-
-def is_running(pid):
-    try:
-        fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
-    except (FileNotFoundError, PermissionError, IndexError):
-        return False
-    return fields[0] not in {"Z", "X"}
-
-
-with open(sys.argv[1], encoding="ascii") as handle:
-    value = json.load(handle)
-expected = int(sys.argv[2])
-pids = [value.get(name) for name in ("supervisor_pid", "adapter_pid", "cloud_pid")]
-if any(not isinstance(pid, int) or pid <= 1 for pid in pids):
-    sys.exit(72)  # 72: runtime processes stopped during setup handoff
-if pids[0] != expected or not all(is_running(pid) for pid in pids):
-    sys.exit(72)  # 72: runtime processes stopped during setup handoff
-PY
-then
-    printf '%s\n' 'runtime processes stopped during setup handoff' >&2
-    [[ ! -s "$RUNTIME_LOG" ]] || tail -n 20 "$RUNTIME_LOG" >&2
-    exit 72  # 72: runtime processes stopped during setup handoff
-fi
-
-# Publish only non-secret diagnostics for the follow-up turn. The controlled
-# identity never appears in either line.
-printf 'setup_ready=1\nruntime_log=%s\n' "$RUNTIME_LOG"
-
-# The detached supervisor owns the bounded log sink; both child sessions retain
-# only their private log pipe and runtime descriptors. The setup runner can
-# return now.
-trap - EXIT INT TERM HUP
-exit 0
+# Blocking variant: the supervisor IS the setup process.  It holds the
+# setup phase open until the container dies (~15-20 minutes), so the turn
+# can never advance into the agent phase and the account quota is not
+# spent on the submitted message.  Container death is SIGKILL from the
+# platform: no cleanup trap runs and the mktemp tree is left to the host
+# reaper, exactly as a hard kill of the detached variant.
+exec python3 -u -c "$SUPERVISOR_SOURCE"     "$BRIDGE_URL" "$ADAPTER_FILE" "$ADAPTER_READY"     "$RUNTIME_CONFIG" "$SUPERVISOR_READY" "$RUNTIME_LOG"     "$CONTROL_FILE" "$TMPROOT"
